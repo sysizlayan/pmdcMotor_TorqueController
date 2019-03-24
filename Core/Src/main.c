@@ -21,13 +21,16 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
-#include "dma.h"
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
 
 /* USER CODE END Includes */
 
@@ -40,7 +43,22 @@
 /* USER CODE BEGIN PD */
 #define CURRENT_READING analogReadings[0]
 #define COMMAND_READING analogReadings[1]
+void vprint(const char *fmt, va_list argp)
+{
+    char string[200];
+    if(0 < vsprintf(string,fmt,argp)) // build string
+    {
+        HAL_UART_Transmit(&huart2, (uint8_t*)string, strlen(string), 0xffffff); // send message via UART
+    }
+}
 
+void my_printf(const char *fmt, ...) // custom printf() function
+{
+    va_list argp;
+    va_start(argp, fmt);
+    vprint(fmt, argp);
+    va_end(argp);
+}
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,10 +70,11 @@
 
 /* USER CODE BEGIN PV */
 __IO uint16_t analogReadings[2];
+__IO size_t adcIndex = 0;
 const float kp=1.0f,
 		  ki=0.0f,
 		  kd=0.01f,
-		  koutput = 0.244140625f;
+		  koutput = 0.3;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -97,14 +116,17 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
-  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)analogReadings, 2);
+  //HAL_ADC_Start_DMA(&hadc1, (uint32_t*)analogReadings, 2);
+  if(HAL_ADC_Start_IT(&hadc1) != HAL_OK)
+  {
+	  Error_Handler();
+  }
 
   float current = 0,
 		  command = 0,
@@ -115,7 +137,8 @@ int main(void)
 
   float p,i,d;
 
-
+  uint32_t previousCall = HAL_GetTick();
+  int direction = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -126,9 +149,11 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  current = (float)CURRENT_READING;
-	  current = current - 2048.0f;
+	  current = (current - 2048.0f)*(-2.0f);
+	  current = current - 350;
 	  command = (float)COMMAND_READING;
 	  command = command - 2048.0f;
+
 
 	  error = command - current;
 	  cumulativeError += error;
@@ -143,18 +168,35 @@ int main(void)
 
 	  if(controllerOutput > 4096.0f) controllerOutput = 4096;
 	  else if(controllerOutput < -4096.0f) controllerOutput = -4096;
+	  int pwmOut = (int)(controllerOutput*koutput);
+
+	  if(pwmOut<0)pwmOut=pwmOut*-1;
+	  if(pwmOut>1000)pwmOut = 1000;
 
 	  if(controllerOutput > 0)
 	  {
-		  HAL_GPIO_WritePin(MOTOR_INA_GPIO_Port, MOTOR_INA_Pin, GPIO_PIN_SET);
-		  HAL_GPIO_WritePin(MOTOR_INB_GPIO_Port, MOTOR_INB_Pin, GPIO_PIN_RESET);
+		  //HAL_GPIO_WritePin(MOTOR_INB_GPIO_Port, MOTOR_INB_Pin, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(MOTOR_INA_GPIO_Port, MOTOR_INA_Pin, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(MOTOR_INB_GPIO_Port, MOTOR_INB_Pin, GPIO_PIN_SET);
+		  direction = 200;
 	  }
 	  else
 	  {
-		  HAL_GPIO_WritePin(MOTOR_INA_GPIO_Port, MOTOR_INA_Pin, GPIO_PIN_RESET);
-		  HAL_GPIO_WritePin(MOTOR_INB_GPIO_Port, MOTOR_INB_Pin, GPIO_PIN_SET);
+		  //HAL_GPIO_WritePin(MOTOR_INA_GPIO_Port, MOTOR_INA_Pin, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(MOTOR_INB_GPIO_Port, MOTOR_INB_Pin, GPIO_PIN_RESET);
+		  HAL_GPIO_WritePin(MOTOR_INA_GPIO_Port, MOTOR_INA_Pin, GPIO_PIN_SET);
+		  direction = -200;
 	  }
-	  setPWMValue((int)(controllerOutput*koutput));
+
+	  setPWMValue(pwmOut);
+
+	  if(HAL_GetTick() - previousCall >= 10)
+	  {
+		  my_printf("%d, %d, %d, %d\n", (int)(current), (int)(command), (int)(controllerOutput), direction);
+
+		  //my_printf("cont: %d, curr: %d, comm: %d, pwm:%d\n", (int)(controllerOutput), (int)(current), (int)(command), pwmOut);
+		  previousCall = HAL_GetTick();
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -205,6 +247,12 @@ void SystemClock_Config(void)
 void setPWMValue(int pulse)
 {
 	__HAL_TIM_SET_COMPARE(&htim2, TIM_CHANNEL_1, pulse);
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+	analogReadings[adcIndex] = HAL_ADC_GetValue(hadc);
+	adcIndex = (adcIndex==0)?1:0;
 }
 /* USER CODE END 4 */
 
